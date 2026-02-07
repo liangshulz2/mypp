@@ -13,6 +13,7 @@ import kotlin.math.abs
 import kotlin.math.max
 
 class MainActivity : AppCompatActivity() {
+    private var latestRows: List<DailyRow> = emptyList()
 
     private val csvPicker = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         val tvCsvResult = findViewById<TextView>(R.id.tvCsvResult)
@@ -20,7 +21,12 @@ class MainActivity : AppCompatActivity() {
             tvCsvResult.text = "未选择CSV文件"
             return@registerForActivityResult
         }
-        tvCsvResult.text = buildCsvSummary(uri)
+        val symbol = findViewById<EditText>(R.id.etSymbol).text.toString().trim()
+        if (symbol.isEmpty()) {
+            tvCsvResult.text = "请先输入品种代码（RB/M/MA）"
+            return@registerForActivityResult
+        }
+        tvCsvResult.text = buildCsvSummary(uri, symbol)
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -28,28 +34,30 @@ class MainActivity : AppCompatActivity() {
         setContentView(R.layout.activity_main)
 
         val etSymbol = findViewById<EditText>(R.id.etSymbol)
-        val etPrice = findViewById<EditText>(R.id.etPrice)
-        val etAtr = findViewById<EditText>(R.id.etAtr)
-        val etMa20Slope = findViewById<EditText>(R.id.etMa20Slope)
-        val etHigh20 = findViewById<EditText>(R.id.etHigh20)
-        val etLow20 = findViewById<EditText>(R.id.etLow20)
-        val etGapAtr = findViewById<EditText>(R.id.etGapAtr)
-        val etConsecutiveLosses = findViewById<EditText>(R.id.etConsecutiveLosses)
-
         val btnEvaluate = findViewById<Button>(R.id.btnEvaluate)
         val btnImportCsv = findViewById<Button>(R.id.btnImportCsv)
         val tvResult = findViewById<TextView>(R.id.tvResult)
 
         btnEvaluate.setOnClickListener {
+            val symbol = etSymbol.text.toString().trim()
+            if (symbol.isEmpty()) {
+                tvResult.text = "请输入品种代码（RB/M/MA）"
+                return@setOnClickListener
+            }
+            if (latestRows.isEmpty()) {
+                tvResult.text = "请先导入CSV数据"
+                return@setOnClickListener
+            }
+            val latest = latestRows.last()
             val input = MarketInput(
-                symbol = etSymbol.text.toString().trim(),
-                closePrice = etPrice.text.toString().toDoubleOrNull() ?: 0.0,
-                atr = etAtr.text.toString().toDoubleOrNull() ?: 0.0,
-                ma20Slope = etMa20Slope.text.toString().toDoubleOrNull() ?: 0.0,
-                high20 = etHigh20.text.toString().toDoubleOrNull() ?: 0.0,
-                low20 = etLow20.text.toString().toDoubleOrNull() ?: 0.0,
-                gapAtrMultiple = etGapAtr.text.toString().toDoubleOrNull() ?: 0.0,
-                consecutiveStopLosses = etConsecutiveLosses.text.toString().toIntOrNull() ?: 0
+                symbol = symbol,
+                closePrice = latest.close,
+                atr = latest.atr ?: 0.0,
+                ma20Slope = latest.ma20Slope,
+                breakoutHigh = latest.breakoutHigh,
+                breakoutLow = latest.breakoutLow,
+                gapAtrMultiple = 0.0,
+                consecutiveStopLosses = 0
             )
 
             val decision = TradingRuleEngine.evaluateEntry(input)
@@ -59,10 +67,10 @@ class MainActivity : AppCompatActivity() {
                     appendLine("方向: ${decision.direction}")
                     appendLine("建议手数: ${decision.suggestedLots}")
                     appendLine("ATR止损距离: ${decision.initialStopByAtr}")
-                    appendLine("金额硬止损(单手): ${decision.hardStopLossAmount}")
+                    appendLine("单笔风险预算: ${decision.hardStopLossAmount}")
                 }
                 appendLine()
-                append(TradingRuleEngine.holdRulesSummary())
+                append(TradingRuleEngine.holdRulesSummary(symbol))
             }
             tvResult.text = detail
         }
@@ -72,22 +80,28 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun buildCsvSummary(uri: Uri): String {
+    private fun buildCsvSummary(uri: Uri, symbol: String): String {
+        val config = TradingRuleEngine.getSymbolConfig(symbol)
+            ?: return "品种不在固定池（仅允许 RB / M / MA）"
         val rows = readCsv(uri)
         if (rows.isEmpty()) {
             return "CSV为空或无法识别字段（需包含 date/high/low/close，atr可选）"
         }
-        val withAtr = calculateAtr(rows)
+        val withAtr = calculateAtr(rows, config.atrPeriod, config.breakoutPeriod)
+        latestRows = withAtr
         val last10 = withAtr.takeLast(10)
         val lines = buildString {
             appendLine("最近10日：")
             last10.forEach { row ->
                 val suggestion = when {
-                    row.close > row.high20 -> "做多"
-                    row.close < row.low20 -> "做空"
+                    row.close > row.breakoutHigh -> "做多"
+                    row.close < row.breakoutLow -> "做空"
                     else -> "观望"
                 }
-                appendLine("${row.date} | 建议: $suggestion | ATR: ${formatNumber(row.atr)}")
+                appendLine(
+                    "${row.date} | 建议: $suggestion | ATR: ${formatNumber(row.atr)}" +
+                        " | 20日最高: ${formatNumber(row.high20)} | 20日最低: ${formatNumber(row.low20)}"
+                )
             }
         }
         return lines
@@ -123,22 +137,50 @@ class MainActivity : AppCompatActivity() {
         } ?: emptyList()
     }
 
-    private fun calculateAtr(rows: List<DailyRow>, period: Int = 14): List<DailyRow> {
+    private fun calculateAtr(
+        rows: List<DailyRow>,
+        atrPeriod: Int,
+        breakoutPeriod: Int
+    ): List<DailyRow> {
         if (rows.isEmpty()) return rows
         val result = mutableListOf<DailyRow>()
         var prevClose = rows.first().close
         val trValues = mutableListOf<Double>()
+        val closeValues = mutableListOf<Double>()
+        var prevMa20: Double? = null
         rows.forEachIndexed { index, row ->
             val tr = max(row.high - row.low, max(abs(row.high - prevClose), abs(row.low - prevClose)))
             trValues.add(tr)
-            val atr = row.atr ?: if (index + 1 >= period) {
-                trValues.takeLast(period).average()
+            val atr = row.atr ?: if (index + 1 >= atrPeriod) {
+                trValues.takeLast(atrPeriod).average()
             } else {
                 trValues.average()
             }
-            val high20 = rows.subList(0, index + 1).takeLast(20).maxOf { it.high }
-            val low20 = rows.subList(0, index + 1).takeLast(20).minOf { it.low }
-            result.add(row.copy(atr = atr, high20 = high20, low20 = low20))
+            closeValues.add(row.close)
+            val recent20 = rows.subList(0, index + 1).takeLast(20)
+            val high20 = recent20.maxOf { it.high }
+            val low20 = recent20.minOf { it.low }
+            val recentBreakout = rows.subList(0, index + 1).takeLast(breakoutPeriod)
+            val breakoutHigh = recentBreakout.maxOf { it.high }
+            val breakoutLow = recentBreakout.minOf { it.low }
+            val ma20 = if (closeValues.size >= 20) {
+                closeValues.takeLast(20).average()
+            } else {
+                closeValues.average()
+            }
+            val ma20Slope = if (prevMa20 == null) 0.0 else ma20 - (prevMa20 ?: ma20)
+            prevMa20 = ma20
+            result.add(
+                row.copy(
+                    atr = atr,
+                    high20 = high20,
+                    low20 = low20,
+                    breakoutHigh = breakoutHigh,
+                    breakoutLow = breakoutLow,
+                    ma20 = ma20,
+                    ma20Slope = ma20Slope
+                )
+            )
             prevClose = row.close
         }
         return result
@@ -156,6 +198,10 @@ class MainActivity : AppCompatActivity() {
         val close: Double,
         val atr: Double? = null,
         val high20: Double = high,
-        val low20: Double = low
+        val low20: Double = low,
+        val breakoutHigh: Double = high,
+        val breakoutLow: Double = low,
+        val ma20: Double = close,
+        val ma20Slope: Double = 0.0
     )
 }

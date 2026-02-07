@@ -43,7 +43,7 @@
             android:id="@+id/btnFetchOnline"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:text="在线获取期货行情"
+            android:text="在线获取期货数据（可直接计算）"
             android:layout_marginTop="8dp" />
 
         <TextView

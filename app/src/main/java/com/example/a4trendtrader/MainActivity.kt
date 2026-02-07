@@ -9,6 +9,9 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
 import java.io.BufferedReader
 import java.io.InputStreamReader
+import java.net.HttpURLConnection
+import java.net.URL
+import kotlin.concurrent.thread
 import kotlin.math.abs
 import kotlin.math.max
 
@@ -36,7 +39,9 @@ class MainActivity : AppCompatActivity() {
         val etSymbol = findViewById<EditText>(R.id.etSymbol)
         val btnEvaluate = findViewById<Button>(R.id.btnEvaluate)
         val btnImportCsv = findViewById<Button>(R.id.btnImportCsv)
+        val btnFetchOnline = findViewById<Button>(R.id.btnFetchOnline)
         val tvResult = findViewById<TextView>(R.id.tvResult)
+        val tvOnlineResult = findViewById<TextView>(R.id.tvOnlineResult)
 
         btnEvaluate.setOnClickListener {
             val symbol = etSymbol.text.toString().trim()
@@ -77,6 +82,18 @@ class MainActivity : AppCompatActivity() {
 
         btnImportCsv.setOnClickListener {
             csvPicker.launch(arrayOf("text/csv", "text/comma-separated-values", "application/vnd.ms-excel"))
+        }
+
+        btnFetchOnline.setOnClickListener {
+            val symbol = etSymbol.text.toString().trim()
+            if (symbol.isEmpty()) {
+                tvOnlineResult.text = "请输入品种代码（RB/M/MA）"
+                return@setOnClickListener
+            }
+            tvOnlineResult.text = "正在获取线上行情..."
+            fetchOnlineQuote(symbol) { result ->
+                tvOnlineResult.text = result
+            }
         }
     }
 
@@ -191,6 +208,90 @@ class MainActivity : AppCompatActivity() {
         return String.format("%.2f", value)
     }
 
+    private fun fetchOnlineQuote(symbol: String, onResult: (String) -> Unit) {
+        val contract = symbolToContract(symbol)
+        if (contract == null) {
+            onResult("品种不在固定池（仅允许 RB / M / MA）")
+            return
+        }
+        thread {
+            val result = runCatching {
+                val url = URL("https://hq.sinajs.cn/list=nf_$contract")
+                val connection = url.openConnection() as HttpURLConnection
+                connection.requestMethod = "GET"
+                connection.setRequestProperty("Referer", "https://vip.stock.finance.sina.com.cn/")
+                connection.setRequestProperty(
+                    "User-Agent",
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
+                        "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+                )
+                connection.connectTimeout = 8000
+                connection.readTimeout = 8000
+                val body = connection.inputStream.bufferedReader().use { it.readText() }
+                parseSinaQuote(contract, body)
+            }.getOrElse { ex ->
+                "获取失败：${ex.message ?: "未知错误"}"
+            }
+            runOnUiThread {
+                onResult(result)
+            }
+        }
+    }
+
+    private fun symbolToContract(symbol: String): String? {
+        return when (symbol.uppercase()) {
+            "RB" -> "RB0"
+            "M" -> "M0"
+            "MA" -> "MA0"
+            else -> null
+        }
+    }
+
+    private fun parseSinaQuote(contract: String, body: String): String {
+        val payload = body.substringAfter("=\"", "")
+            .substringBeforeLast("\"", "")
+        if (payload.isBlank()) {
+            return "未获取到行情数据（可能被限流或合约无效）"
+        }
+        val fields = payload.split(",")
+        val quote = FuturesQuote(
+            name = fields.getOrNull(0).orEmpty(),
+            time = fields.getOrNull(1).orEmpty(),
+            open = fields.getOrNull(2)?.toDoubleOrNull(),
+            high = fields.getOrNull(3)?.toDoubleOrNull(),
+            low = fields.getOrNull(4)?.toDoubleOrNull(),
+            lastClose = fields.getOrNull(5)?.toDoubleOrNull(),
+            bid = fields.getOrNull(6)?.toDoubleOrNull(),
+            ask = fields.getOrNull(7)?.toDoubleOrNull(),
+            price = fields.getOrNull(8)?.toDoubleOrNull(),
+            avgPrice = fields.getOrNull(9)?.toDoubleOrNull(),
+            settle = fields.getOrNull(10)?.toDoubleOrNull(),
+            buyVol = fields.getOrNull(11)?.toLongOrNull(),
+            sellVol = fields.getOrNull(12)?.toLongOrNull(),
+            hold = fields.getOrNull(13)?.toLongOrNull(),
+            volume = fields.getOrNull(14)?.toLongOrNull()
+        )
+        return buildString {
+            appendLine("在线行情（$contract）：${quote.name}")
+            appendLine("时间: ${quote.time}")
+            appendLine(
+                "开/高/低/现: ${formatNumber(quote.open)} / ${formatNumber(quote.high)} / " +
+                    "${formatNumber(quote.low)} / ${formatNumber(quote.price)}"
+            )
+            appendLine(
+                "昨收: ${formatNumber(quote.lastClose)} | 结算: ${formatNumber(quote.settle)}" +
+                    " | 均价: ${formatNumber(quote.avgPrice)}"
+            )
+            appendLine(
+                "买一/卖一: ${formatNumber(quote.bid)} / ${formatNumber(quote.ask)}"
+            )
+            appendLine(
+                "成交量: ${quote.volume ?: "--"} | 持仓量: ${quote.hold ?: "--"}"
+            )
+            appendLine("数据源: 新浪财经 (hq.sinajs.cn)")
+        }
+    }
+
     data class DailyRow(
         val date: String,
         val high: Double,
@@ -203,5 +304,23 @@ class MainActivity : AppCompatActivity() {
         val breakoutLow: Double = low,
         val ma20: Double = close,
         val ma20Slope: Double = 0.0
+    )
+
+    data class FuturesQuote(
+        val name: String,
+        val time: String,
+        val open: Double?,
+        val high: Double?,
+        val low: Double?,
+        val lastClose: Double?,
+        val bid: Double?,
+        val ask: Double?,
+        val price: Double?,
+        val avgPrice: Double?,
+        val settle: Double?,
+        val buyVol: Long?,
+        val sellVol: Long?,
+        val hold: Long?,
+        val volume: Long?
     )
 }

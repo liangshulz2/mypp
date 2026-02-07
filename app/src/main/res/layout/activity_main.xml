@@ -25,54 +25,20 @@
             android:hint="品种代码（RB/M/MA）"
             android:inputType="textCapCharacters" />
 
-        <EditText
-            android:id="@+id/etPrice"
+        <Button
+            android:id="@+id/btnImportCsv"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:hint="当前收盘价"
-            android:inputType="numberDecimal" />
+            android:text="导入CSV行情数据"
+            android:layout_marginTop="8dp" />
 
-        <EditText
-            android:id="@+id/etAtr"
+        <TextView
+            android:id="@+id/tvCsvStatus"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:hint="ATR"
-            android:inputType="numberDecimal" />
-
-        <EditText
-            android:id="@+id/etMa20Slope"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:hint="20日均线斜率（可正可负，不可为0）"
-            android:inputType="numberDecimal|numberSigned" />
-
-        <EditText
-            android:id="@+id/etHigh20"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:hint="过去20日最高价"
-            android:inputType="numberDecimal" />
-
-        <EditText
-            android:id="@+id/etLow20"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:hint="过去20日最低价"
-            android:inputType="numberDecimal" />
-
-        <EditText
-            android:id="@+id/etGapAtr"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:hint="当日跳空（按ATR倍数，例如1.2）"
-            android:inputType="numberDecimal" />
-
-        <EditText
-            android:id="@+id/etConsecutiveLosses"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:hint="连续止损次数"
-            android:inputType="number" />
+            android:text="未导入CSV"
+            android:textSize="13sp"
+            android:paddingTop="6dp" />
 
         <Button
             android:id="@+id/btnEvaluate"

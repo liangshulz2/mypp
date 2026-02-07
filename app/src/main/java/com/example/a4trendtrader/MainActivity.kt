@@ -7,6 +7,7 @@ import android.widget.EditText
 import android.widget.TextView
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
+import org.json.JSONArray
 import java.io.BufferedReader
 import java.io.InputStreamReader
 import java.net.HttpURLConnection
@@ -50,7 +51,7 @@ class MainActivity : AppCompatActivity() {
                 return@setOnClickListener
             }
             if (latestRows.isEmpty()) {
-                tvResult.text = "请先导入CSV数据"
+                tvResult.text = "请先导入CSV或在线获取数据"
                 return@setOnClickListener
             }
             val latest = latestRows.last()
@@ -90,8 +91,8 @@ class MainActivity : AppCompatActivity() {
                 tvOnlineResult.text = "请输入品种代码（RB/M/MA）"
                 return@setOnClickListener
             }
-            tvOnlineResult.text = "正在获取线上行情..."
-            fetchOnlineQuote(symbol) { result ->
+            tvOnlineResult.text = "正在获取线上行情并计算指标..."
+            fetchOnlineData(symbol) { result ->
                 tvOnlineResult.text = result
             }
         }
@@ -106,22 +107,7 @@ class MainActivity : AppCompatActivity() {
         }
         val withAtr = calculateAtr(rows, config.atrPeriod, config.breakoutPeriod)
         latestRows = withAtr
-        val last10 = withAtr.takeLast(10)
-        val lines = buildString {
-            appendLine("最近10日：")
-            last10.forEach { row ->
-                val suggestion = when {
-                    row.close > row.breakoutHigh -> "做多"
-                    row.close < row.breakoutLow -> "做空"
-                    else -> "观望"
-                }
-                appendLine(
-                    "${row.date} | 建议: $suggestion | ATR: ${formatNumber(row.atr)}" +
-                        " | 20日最高: ${formatNumber(row.high20)} | 20日最低: ${formatNumber(row.low20)}"
-                )
-            }
-        }
-        return lines
+        return buildHistorySummary(withAtr)
     }
 
     private fun readCsv(uri: Uri): List<DailyRow> {
@@ -208,7 +194,12 @@ class MainActivity : AppCompatActivity() {
         return String.format("%.2f", value)
     }
 
-    private fun fetchOnlineQuote(symbol: String, onResult: (String) -> Unit) {
+    private fun fetchOnlineData(symbol: String, onResult: (String) -> Unit) {
+        val config = TradingRuleEngine.getSymbolConfig(symbol)
+        if (config == null) {
+            onResult("品种不在固定池（仅允许 RB / M / MA）")
+            return
+        }
         val contract = symbolToContract(symbol)
         if (contract == null) {
             onResult("品种不在固定池（仅允许 RB / M / MA）")
@@ -216,7 +207,10 @@ class MainActivity : AppCompatActivity() {
         }
         thread {
             val result = runCatching {
-                val url = URL("https://hq.sinajs.cn/list=nf_$contract")
+                val url = URL(
+                    "https://stock2.finance.sina.com.cn/futures/api/jsonp.php/" +
+                        "var%20t1=/InnerFuturesNewService.getDailyKLine?symbol=$contract"
+                )
                 val connection = url.openConnection() as HttpURLConnection
                 connection.requestMethod = "GET"
                 connection.setRequestProperty("Referer", "https://vip.stock.finance.sina.com.cn/")
@@ -228,7 +222,17 @@ class MainActivity : AppCompatActivity() {
                 connection.connectTimeout = 8000
                 connection.readTimeout = 8000
                 val body = connection.inputStream.bufferedReader().use { it.readText() }
-                parseSinaQuote(contract, body)
+                val rows = parseSinaDailyKLine(body)
+                if (rows.isEmpty()) {
+                    "在线数据为空（可能被限流或合约无效）"
+                } else {
+                    val withAtr = calculateAtr(rows, config.atrPeriod, config.breakoutPeriod)
+                    latestRows = withAtr
+                    buildString {
+                        appendLine("在线数据已加载：${withAtr.size}条")
+                        append(buildHistorySummary(withAtr))
+                    }
+                }
             }.getOrElse { ex ->
                 "获取失败：${ex.message ?: "未知错误"}"
             }
@@ -247,48 +251,46 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun parseSinaQuote(contract: String, body: String): String {
-        val payload = body.substringAfter("=\"", "")
-            .substringBeforeLast("\"", "")
-        if (payload.isBlank()) {
-            return "未获取到行情数据（可能被限流或合约无效）"
+    private fun parseSinaDailyKLine(body: String): List<DailyRow> {
+        val start = body.indexOf('[')
+        val end = body.lastIndexOf(']')
+        if (start == -1 || end == -1 || end <= start) {
+            return emptyList()
         }
-        val fields = payload.split(",")
-        val quote = FuturesQuote(
-            name = fields.getOrNull(0).orEmpty(),
-            time = fields.getOrNull(1).orEmpty(),
-            open = fields.getOrNull(2)?.toDoubleOrNull(),
-            high = fields.getOrNull(3)?.toDoubleOrNull(),
-            low = fields.getOrNull(4)?.toDoubleOrNull(),
-            lastClose = fields.getOrNull(5)?.toDoubleOrNull(),
-            bid = fields.getOrNull(6)?.toDoubleOrNull(),
-            ask = fields.getOrNull(7)?.toDoubleOrNull(),
-            price = fields.getOrNull(8)?.toDoubleOrNull(),
-            avgPrice = fields.getOrNull(9)?.toDoubleOrNull(),
-            settle = fields.getOrNull(10)?.toDoubleOrNull(),
-            buyVol = fields.getOrNull(11)?.toLongOrNull(),
-            sellVol = fields.getOrNull(12)?.toLongOrNull(),
-            hold = fields.getOrNull(13)?.toLongOrNull(),
-            volume = fields.getOrNull(14)?.toLongOrNull()
-        )
+        val jsonText = body.substring(start, end + 1)
+        val jsonArray = JSONArray(jsonText)
+        val rows = mutableListOf<DailyRow>()
+        for (i in 0 until jsonArray.length()) {
+            val item = jsonArray.optJSONArray(i) ?: continue
+            val date = item.optString(0).trim()
+            val high = item.optDouble(2).takeIf { !it.isNaN() && it > 0 }
+                ?: item.optString(2).toDoubleOrNull()
+            val low = item.optDouble(3).takeIf { !it.isNaN() && it > 0 }
+                ?: item.optString(3).toDoubleOrNull()
+            val close = item.optDouble(4).takeIf { !it.isNaN() && it > 0 }
+                ?: item.optString(4).toDoubleOrNull()
+            if (date.isNotEmpty() && high != null && low != null && close != null) {
+                rows.add(DailyRow(date = date, high = high, low = low, close = close))
+            }
+        }
+        return rows
+    }
+
+    private fun buildHistorySummary(rows: List<DailyRow>): String {
+        val last10 = rows.takeLast(10)
         return buildString {
-            appendLine("在线行情（$contract）：${quote.name}")
-            appendLine("时间: ${quote.time}")
-            appendLine(
-                "开/高/低/现: ${formatNumber(quote.open)} / ${formatNumber(quote.high)} / " +
-                    "${formatNumber(quote.low)} / ${formatNumber(quote.price)}"
-            )
-            appendLine(
-                "昨收: ${formatNumber(quote.lastClose)} | 结算: ${formatNumber(quote.settle)}" +
-                    " | 均价: ${formatNumber(quote.avgPrice)}"
-            )
-            appendLine(
-                "买一/卖一: ${formatNumber(quote.bid)} / ${formatNumber(quote.ask)}"
-            )
-            appendLine(
-                "成交量: ${quote.volume ?: "--"} | 持仓量: ${quote.hold ?: "--"}"
-            )
-            appendLine("数据源: 新浪财经 (hq.sinajs.cn)")
+            appendLine("最近10日：")
+            last10.forEach { row ->
+                val suggestion = when {
+                    row.close > row.breakoutHigh -> "做多"
+                    row.close < row.breakoutLow -> "做空"
+                    else -> "观望"
+                }
+                appendLine(
+                    "${row.date} | 建议: $suggestion | ATR: ${formatNumber(row.atr)}" +
+                        " | 20日最高: ${formatNumber(row.high20)} | 20日最低: ${formatNumber(row.low20)}"
+                )
+            }
         }
     }
 
@@ -306,21 +308,4 @@ class MainActivity : AppCompatActivity() {
         val ma20Slope: Double = 0.0
     )
 
-    data class FuturesQuote(
-        val name: String,
-        val time: String,
-        val open: Double?,
-        val high: Double?,
-        val low: Double?,
-        val lastClose: Double?,
-        val bid: Double?,
-        val ask: Double?,
-        val price: Double?,
-        val avgPrice: Double?,
-        val settle: Double?,
-        val buyVol: Long?,
-        val sellVol: Long?,
-        val hold: Long?,
-        val volume: Long?
-    )
 }
